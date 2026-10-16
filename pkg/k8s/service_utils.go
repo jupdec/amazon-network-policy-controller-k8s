@@ -1,7 +1,8 @@
 package k8s
 
 import (
-	"github.com/pkg/errors"
+	"fmt"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -9,13 +10,13 @@ import (
 
 // LookupServiceListenPort returns the numerical port for the service listen port if the target port name matches
 // or the port number and the protocol matches the target port. If no matching port is found, it returns a 0 and an error.
-func LookupServiceListenPort(svc *corev1.Service, port intstr.IntOrString, protocol corev1.Protocol) (int32, error) {
+func LookupServiceListenPort(svc *corev1.Service, npPort intstr.IntOrString, npProtocol corev1.Protocol) (int32, error) {
 	for _, svcPort := range svc.Spec.Ports {
-		if svcPort.TargetPort.Type == port.Type && svcPort.TargetPort.String() == port.String() && svcPort.Protocol == protocol {
+		if svcPort.TargetPort.Type == npPort.Type && svcPort.TargetPort.String() == npPort.String() && svcPort.Protocol == npProtocol {
 			return svcPort.Port, nil
 		}
 	}
-	return 0, errors.Errorf("unable to find port %s on service %s", port.String(), NamespacedName(svc))
+	return 0, fmt.Errorf("unable to find port %s on service %s", npPort.String(), NamespacedName(svc))
 }
 
 // LookupListenPortFromPodSpec returns the numerical listener port from the service spec if the input port matches the target port
@@ -41,7 +42,7 @@ func LookupListenPortFromPodSpec(svc *corev1.Service, pod *corev1.Pod, port ints
 			}
 		}
 	}
-	return 0, errors.Errorf("unable to find listener port for port %s on service %s", port.String(), NamespacedName(svc))
+	return 0, fmt.Errorf("unable to find listener port for port %s on service %s", port.String(), NamespacedName(svc))
 }
 
 // IsServiceHeadless returns true if the service is headless

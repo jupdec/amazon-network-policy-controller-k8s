@@ -5,13 +5,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"strconv"
+	"time"
 
 	"golang.org/x/exp/maps"
 
 	"github.com/go-logr/logr"
 	"github.com/pkg/errors"
 	"github.com/samber/lo"
+	corev1 "k8s.io/api/core/v1"
 	networking "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -20,9 +23,34 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	policyinfo "github.com/aws/amazon-network-policy-controller-k8s/api/v1alpha1"
+	policyequality "github.com/aws/amazon-network-policy-controller-k8s/pkg/equality"
 	"github.com/aws/amazon-network-policy-controller-k8s/pkg/k8s"
 	"github.com/aws/amazon-network-policy-controller-k8s/pkg/resolvers"
 )
+
+const (
+	// LastChangeTriggerTimeAnnotation is set on PolicyEndpoint/ClusterPolicyEndpoint
+	// to track when NPC last created or updated the resource. NPA reads this to
+	// compute E2E policy programming latency (same pattern as kube-proxy's
+	// endpoints.kubernetes.io/last-change-trigger-time on EndpointSlice).
+	LastChangeTriggerTimeAnnotation = "networking.k8s.aws/last-change-trigger-time"
+)
+
+// setLastChangeTriggerTime sets the E2E latency annotation on a PolicyEndpoint.
+func setLastChangeTriggerTime(pe *policyinfo.PolicyEndpoint) {
+	if pe.Annotations == nil {
+		pe.Annotations = make(map[string]string)
+	}
+	pe.Annotations[LastChangeTriggerTimeAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
+}
+
+// setLastChangeTriggerTimeOnCPE sets the E2E latency annotation on a ClusterPolicyEndpoint.
+func setLastChangeTriggerTimeOnCPE(cpe *policyinfo.ClusterPolicyEndpoint) {
+	if cpe.Annotations == nil {
+		cpe.Annotations = make(map[string]string)
+	}
+	cpe.Annotations[LastChangeTriggerTimeAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
+}
 
 // PolicyMetadata contains the minimal metadata needed for creating PolicyEndpoints
 type PolicyMetadata struct {
@@ -71,6 +99,8 @@ type policyEndpointsManager struct {
 }
 
 func (m *policyEndpointsManager) Reconcile(ctx context.Context, policy *networking.NetworkPolicy) error {
+	computeStart := time.Now()
+
 	ingressRules, egressRules, podSelectorEndpoints, err := m.endpointsResolver.Resolve(ctx, policy)
 	if err != nil {
 		return err
@@ -91,27 +121,32 @@ func (m *policyEndpointsManager) Reconcile(ctx context.Context, policy *networki
 	if err != nil {
 		return err
 	}
-	m.logger.Info("Got policy endpoints lists", "create", len(createList), "update", len(updateList), "delete", len(deleteList))
-	for _, policyEndpoint := range createList {
-		if err := m.k8sClient.Create(ctx, &policyEndpoint); err != nil {
+
+	computeDuration := time.Since(computeStart)
+	crudStart := time.Now()
+
+	for i := range createList {
+		setLastChangeTriggerTime(&createList[i])
+		if err := m.k8sClient.Create(ctx, &createList[i]); err != nil {
 			return err
 		}
-		m.logger.Info("Created policy endpoint", "id", k8s.NamespacedName(&policyEndpoint))
+		m.logger.Info("Created policy endpoint", "id", k8s.NamespacedName(&createList[i]))
 	}
 
-	for _, policyEndpoint := range updateList {
+	for i := range updateList {
 		oldRes := &policyinfo.PolicyEndpoint{}
-		if err := m.k8sClient.Get(ctx, k8s.NamespacedName(&policyEndpoint), oldRes); err != nil {
+		if err := m.k8sClient.Get(ctx, k8s.NamespacedName(&updateList[i]), oldRes); err != nil {
 			return err
 		}
-		if equality.Semantic.DeepEqual(oldRes.Spec, policyEndpoint.Spec) {
-			m.logger.V(1).Info("Policy endpoint already up to date", "id", k8s.NamespacedName(&policyEndpoint))
+		if policyequality.EqualPolicyEndpointSpec(oldRes.Spec, updateList[i].Spec) {
+			m.logger.V(1).Info("Policy endpoint already up to date", "id", k8s.NamespacedName(&updateList[i]))
 			continue
 		}
-		if err := m.k8sClient.Patch(ctx, &policyEndpoint, client.MergeFrom(oldRes)); err != nil {
+		setLastChangeTriggerTime(&updateList[i])
+		if err := m.k8sClient.Patch(ctx, &updateList[i], client.MergeFrom(oldRes)); err != nil {
 			return err
 		}
-		m.logger.Info("Updated policy endpoint", "id", k8s.NamespacedName(&policyEndpoint))
+		m.logger.Info("Updated policy endpoint", "id", k8s.NamespacedName(&updateList[i]))
 	}
 
 	for _, policyEndpoint := range deleteList {
@@ -120,6 +155,10 @@ func (m *policyEndpointsManager) Reconcile(ctx context.Context, policy *networki
 		}
 		m.logger.Info("Deleted policy endpoint", "id", k8s.NamespacedName(&policyEndpoint))
 	}
+
+	m.logger.Info("NP reconcile phase durations", "policy", policy.Name, "namespace", policy.Namespace,
+		"computeDuration", computeDuration.Seconds(), "crudDuration", time.Since(crudStart).Seconds(),
+		"create", len(createList), "update", len(updateList), "delete", len(deleteList))
 
 	return nil
 }
@@ -141,6 +180,8 @@ func (m *policyEndpointsManager) Cleanup(ctx context.Context, policy *networking
 }
 
 func (m *policyEndpointsManager) ReconcileANP(ctx context.Context, anp *policyinfo.ApplicationNetworkPolicy) error {
+	computeStart := time.Now()
+
 	ingressRules, egressRules, podSelectorEndpoints, err := m.anpEndpointsResolver.ResolveApplicationNetworkPolicy(ctx, anp)
 	if err != nil {
 		return err
@@ -161,28 +202,32 @@ func (m *policyEndpointsManager) ReconcileANP(ctx context.Context, anp *policyin
 	if err != nil {
 		return err
 	}
-	m.logger.Info("Got ANP policy endpoints lists", "create", len(createList), "update", len(updateList), "delete", len(deleteList))
 
-	for _, policyEndpoint := range createList {
-		if err := m.k8sClient.Create(ctx, &policyEndpoint); err != nil {
+	computeDuration := time.Since(computeStart)
+	crudStart := time.Now()
+
+	for i := range createList {
+		setLastChangeTriggerTime(&createList[i])
+		if err := m.k8sClient.Create(ctx, &createList[i]); err != nil {
 			return err
 		}
-		m.logger.Info("Created ANP policy endpoint", "id", k8s.NamespacedName(&policyEndpoint))
+		m.logger.Info("Created ANP policy endpoint", "id", k8s.NamespacedName(&createList[i]))
 	}
 
-	for _, policyEndpoint := range updateList {
+	for i := range updateList {
 		oldRes := &policyinfo.PolicyEndpoint{}
-		if err := m.k8sClient.Get(ctx, k8s.NamespacedName(&policyEndpoint), oldRes); err != nil {
+		if err := m.k8sClient.Get(ctx, k8s.NamespacedName(&updateList[i]), oldRes); err != nil {
 			return err
 		}
-		if equality.Semantic.DeepEqual(oldRes.Spec, policyEndpoint.Spec) {
-			m.logger.V(1).Info("ANP policy endpoint already up to date", "id", k8s.NamespacedName(&policyEndpoint))
+		if policyequality.EqualPolicyEndpointSpec(oldRes.Spec, updateList[i].Spec) {
+			m.logger.V(1).Info("ANP policy endpoint already up to date", "id", k8s.NamespacedName(&updateList[i]))
 			continue
 		}
-		if err := m.k8sClient.Patch(ctx, &policyEndpoint, client.MergeFrom(oldRes)); err != nil {
+		setLastChangeTriggerTime(&updateList[i])
+		if err := m.k8sClient.Patch(ctx, &updateList[i], client.MergeFrom(oldRes)); err != nil {
 			return err
 		}
-		m.logger.Info("Updated ANP policy endpoint", "id", k8s.NamespacedName(&policyEndpoint))
+		m.logger.Info("Updated ANP policy endpoint", "id", k8s.NamespacedName(&updateList[i]))
 	}
 
 	for _, policyEndpoint := range deleteList {
@@ -191,6 +236,10 @@ func (m *policyEndpointsManager) ReconcileANP(ctx context.Context, anp *policyin
 		}
 		m.logger.Info("Deleted ANP policy endpoint", "id", k8s.NamespacedName(&policyEndpoint))
 	}
+
+	m.logger.Info("ANP reconcile phase durations", "policy", anp.Name, "namespace", anp.Namespace,
+		"computeDuration", computeDuration.Seconds(), "crudDuration", time.Since(crudStart).Seconds(),
+		"create", len(createList), "update", len(updateList), "delete", len(deleteList))
 
 	return nil
 }
@@ -284,18 +333,44 @@ func (m *policyEndpointsManager) processPolicyEndpoints(pes []policyinfo.PolicyE
 	return newPEs
 }
 
-// TODO: Unify combineRulesEndpoints and combineANPRulesEndpoints - both can use getEndpointInfoKey() for consistent hashing
-// the controller should consolidate the ingress and egress endpoints and put entries to one CIDR if they belong to a same CIDR
+// getCombineKey creates a combining key from CIDR or DomainName and sorted exceptions,
+// excluding ports so that entries with the same network identity get merged.
+func getCombineKey(ep policyinfo.EndpointInfo) string {
+	var key string
+	if ep.DomainName != "" {
+		key = "fqdn|" + string(ep.DomainName) + "|"
+	} else {
+		key = "cidr|" + string(ep.CIDR) + "|"
+	}
+
+	sortedExcepts := make([]policyinfo.NetworkAddress, len(ep.Except))
+	copy(sortedExcepts, ep.Except)
+	sort.Slice(sortedExcepts, func(i, j int) bool {
+		return string(sortedExcepts[i]) < string(sortedExcepts[j])
+	})
+	for _, except := range sortedExcepts {
+		key += string(except) + "|"
+	}
+
+	return key
+}
+
 func combineRulesEndpoints(ingressEndpoints []policyinfo.EndpointInfo) []policyinfo.EndpointInfo {
 	combinedMap := make(map[string]policyinfo.EndpointInfo)
 	for _, iep := range ingressEndpoints {
-		if _, ok := combinedMap[string(iep.CIDR)]; ok {
-			tempIEP := combinedMap[string(iep.CIDR)]
-			tempIEP.Ports = append(combinedMap[string(iep.CIDR)].Ports, iep.Ports...)
-			tempIEP.Except = append(combinedMap[string(iep.CIDR)].Except, iep.Except...)
-			combinedMap[string(iep.CIDR)] = tempIEP
+		key := getCombineKey(iep)
+
+		if existing, ok := combinedMap[key]; ok {
+			// If either has all ports, result is all ports
+			if len(iep.Ports) == 0 || len(existing.Ports) == 0 {
+				existing.Ports = []policyinfo.Port{}
+			} else {
+				// Both have specific ports, append and deduplicate
+				existing.Ports = deduplicatePorts(append(existing.Ports, iep.Ports...))
+			}
+			combinedMap[key] = existing
 		} else {
-			combinedMap[string(iep.CIDR)] = iep
+			combinedMap[key] = iep
 		}
 	}
 	if len(combinedMap) > 0 {
@@ -308,30 +383,11 @@ func combineRulesEndpoints(ingressEndpoints []policyinfo.EndpointInfo) []policyi
 func (m *policyEndpointsManager) processANPPolicyEndpoints(pes []policyinfo.PolicyEndpoint) []policyinfo.PolicyEndpoint {
 	var newPEs []policyinfo.PolicyEndpoint
 	for _, pe := range pes {
-		pe.Spec.Ingress = m.combineANPRulesEndpoints(pe.Spec.Ingress)
-		pe.Spec.Egress = m.combineANPRulesEndpoints(pe.Spec.Egress)
+		pe.Spec.Ingress = combineRulesEndpoints(pe.Spec.Ingress)
+		pe.Spec.Egress = combineRulesEndpoints(pe.Spec.Egress)
 		newPEs = append(newPEs, pe)
 	}
 	return newPEs
-}
-
-// combineANPRulesEndpoints handles both CIDR and FQDN endpoints
-func (m *policyEndpointsManager) combineANPRulesEndpoints(endpoints []policyinfo.EndpointInfo) []policyinfo.EndpointInfo {
-	combinedMap := make(map[string]policyinfo.EndpointInfo)
-	for _, ep := range endpoints {
-		key := m.getEndpointInfoKey(ep) // Uses hash that handles both CIDR and FQDN
-		if existing, ok := combinedMap[key]; ok {
-			existing.Ports = append(existing.Ports, ep.Ports...)
-			existing.Except = append(existing.Except, ep.Except...)
-			combinedMap[key] = existing
-		} else {
-			combinedMap[key] = ep
-		}
-	}
-	if len(combinedMap) > 0 {
-		return maps.Values(combinedMap)
-	}
-	return nil
 }
 
 func (m *policyEndpointsManager) newPolicyEndpoint(metadata PolicyMetadata,
@@ -377,32 +433,51 @@ func (m *policyEndpointsManager) getListOfEndpointInfoFromHash(hashes []string, 
 	return ruleList
 }
 
+// TODO: this can return different hash for semantically same endpointinfo as port slice order can generate separate hash.
+// Check how its tied in bin packing algo and fix if needed
 func (m *policyEndpointsManager) getEndpointInfoKey(info policyinfo.EndpointInfo) string {
 	hasher := sha256.New()
 
+	// Every field is written delimited and self-describing so that no two
+	// semantically different endpoints can produce the same byte stream. A bare
+	// concatenation (e.g. port "1" followed by endPort "23") is ambiguous with a
+	// single port "123"; the "field=value|" framing removes that ambiguity.
 	// Handle FQDN case for ApplicationNetworkPolicy
 	if info.DomainName != "" {
-		hasher.Write([]byte(info.DomainName))
+		fmt.Fprintf(hasher, "domainName=%s|", info.DomainName)
 	} else {
 		// Handle CIDR case for NetworkPolicy
-		hasher.Write([]byte(info.CIDR))
+		fmt.Fprintf(hasher, "cidr=%s|", info.CIDR)
 		for _, except := range info.Except {
-			hasher.Write([]byte(except))
+			fmt.Fprintf(hasher, "except=%s|", except)
 		}
 	}
 
 	for _, port := range info.Ports {
-		if port.Protocol != nil {
-			hasher.Write([]byte(*port.Protocol))
-		}
-		if port.Port != nil {
-			hasher.Write([]byte(strconv.Itoa(int(*port.Port))))
-		}
-		if port.EndPort != nil {
-			hasher.Write([]byte(strconv.Itoa(int(*port.EndPort))))
-		}
+		fmt.Fprintf(hasher, "proto=%s|port=%s|endPort=%s|",
+			protocolKeyPart(port.Protocol),
+			int32PtrKeyPart(port.Port),
+			int32PtrKeyPart(port.EndPort))
 	}
 	return hex.EncodeToString(hasher.Sum(nil))
+}
+
+// protocolKeyPart renders a protocol pointer for hashing, using "nil" for an
+// absent value so a missing protocol is distinguishable from any real one.
+func protocolKeyPart(p *corev1.Protocol) string {
+	if p == nil {
+		return "nil"
+	}
+	return string(*p)
+}
+
+// int32PtrKeyPart renders an int32 pointer for hashing, using "nil" for an
+// absent value so a missing port is distinguishable from port 0.
+func int32PtrKeyPart(p *int32) string {
+	if p == nil {
+		return "nil"
+	}
+	return strconv.Itoa(int(*p))
 }
 
 // processExistingPolicyEndpoints processes the existing policies with the incoming policy changes
@@ -677,6 +752,8 @@ func (m *policyEndpointsManager) computeApplicationNetworkPolicyEndpoints(anp *p
 }
 
 func (m *policyEndpointsManager) ReconcileCNP(ctx context.Context, cnp *policyinfo.ClusterNetworkPolicy) error {
+	computeStart := time.Now()
+
 	ingressRules, egressRules, podSelectorEndpoints, err := m.cnpEndpointsResolver.ResolveClusterNetworkPolicy(ctx, cnp)
 	if err != nil {
 		return err
@@ -696,21 +773,32 @@ func (m *policyEndpointsManager) ReconcileCNP(ctx context.Context, cnp *policyin
 		return err
 	}
 
-	m.logger.Info("Got cluster policy endpoints lists", "create", len(createList), "update", len(updateList), "delete", len(deleteList))
+	computeDuration := time.Since(computeStart)
+	crudStart := time.Now()
 
 	// Create, update, delete ClusterPolicyEndpoints
-	for _, cpe := range createList {
-		if err := m.k8sClient.Create(ctx, &cpe); err != nil {
+	for i := range createList {
+		setLastChangeTriggerTimeOnCPE(&createList[i])
+		if err := m.k8sClient.Create(ctx, &createList[i]); err != nil {
 			return err
 		}
-		m.logger.Info("Created cluster policy endpoint", "name", cpe.Name)
+		m.logger.Info("Created cluster policy endpoint", "name", createList[i].Name)
 	}
 
-	for _, cpe := range updateList {
-		if err := m.k8sClient.Update(ctx, &cpe); err != nil {
+	for i := range updateList {
+		oldRes := &policyinfo.ClusterPolicyEndpoint{}
+		if err := m.k8sClient.Get(ctx, k8s.NamespacedName(&updateList[i]), oldRes); err != nil {
 			return err
 		}
-		m.logger.Info("Updated cluster policy endpoint", "name", cpe.Name)
+		if policyequality.EqualClusterPolicyEndpointSpec(oldRes.Spec, updateList[i].Spec) {
+			m.logger.V(1).Info("Cluster policy endpoint already up to date", "id", k8s.NamespacedName(&updateList[i]))
+			continue
+		}
+		setLastChangeTriggerTimeOnCPE(&updateList[i])
+		if err := m.k8sClient.Update(ctx, &updateList[i]); err != nil {
+			return err
+		}
+		m.logger.Info("Updated cluster policy endpoint", "name", updateList[i].Name)
 	}
 
 	for _, cpe := range deleteList {
@@ -719,6 +807,10 @@ func (m *policyEndpointsManager) ReconcileCNP(ctx context.Context, cnp *policyin
 		}
 		m.logger.Info("Deleted cluster policy endpoint", "name", cpe.Name)
 	}
+
+	m.logger.Info("CNP reconcile phase durations", "policy", cnp.Name,
+		"computeDuration", computeDuration.Seconds(), "crudDuration", time.Since(crudStart).Seconds(),
+		"create", len(createList), "update", len(updateList), "delete", len(deleteList))
 
 	return nil
 }

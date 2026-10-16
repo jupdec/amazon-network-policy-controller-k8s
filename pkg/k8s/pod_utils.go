@@ -1,7 +1,8 @@
 package k8s
 
 import (
-	"github.com/pkg/errors"
+	"fmt"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -49,7 +50,7 @@ func LookupContainerPortAndName(pod *corev1.Pod, port intstr.IntOrString, protoc
 	if port.Type == intstr.Int {
 		return port.IntVal, "", nil
 	}
-	return 0, "", errors.Errorf("unable to find port %s on pod %s", port.String(), NamespacedName(pod))
+	return 0, "", fmt.Errorf("unable to find port %s on pod %s", port.String(), NamespacedName(pod))
 }
 
 // StripDownPodTransformFunc is a transform function that strips down pod to reduce memory usage.
@@ -62,15 +63,23 @@ func StripDownPodTransformFunc(obj interface{}) (interface{}, error) {
 }
 
 // stripDownPodObject provides an stripDown version of pod to reduce memory usage.
-// NOTE: if the controller needs to refer to more pod fields in the future these fields need to be added to the cache
+// NOTE: if the controller needs to refer to more pod fields in the future these fields need to be added to the cache.
+// Only annotation key the controller reads is podIPAnnotation (see GetPodIP); every
+// other annotation is dropped so the cache holds at most one annotation per pod.
+// Labels are preserved because policy podSelectors match against them, including on
+// Delete events (see resolvers.isPodMatchesPolicySelector).
 func stripDownPodObject(pod *corev1.Pod) *corev1.Pod {
+	var prunedAnnotations map[string]string
+	if v, ok := pod.Annotations[podIPAnnotation]; ok {
+		prunedAnnotations = map[string]string{podIPAnnotation: v}
+	}
 	pod.ObjectMeta = metav1.ObjectMeta{
 		Name:              pod.Name,
 		Namespace:         pod.Namespace,
 		UID:               pod.UID,
 		DeletionTimestamp: pod.DeletionTimestamp,
 		Labels:            pod.Labels,
-		Annotations:       pod.Annotations,
+		Annotations:       prunedAnnotations,
 		ResourceVersion:   pod.ResourceVersion,
 		Finalizers:        pod.Finalizers,
 	}
@@ -83,7 +92,8 @@ func stripDownPodObject(pod *corev1.Pod) *corev1.Pod {
 		})
 	}
 	pod.Spec = corev1.PodSpec{
-		Containers: strippedContainers,
+		Containers:  strippedContainers,
+		HostNetwork: pod.Spec.HostNetwork,
 	}
 	pod.Status = corev1.PodStatus{
 		HostIP:  pod.Status.HostIP,
