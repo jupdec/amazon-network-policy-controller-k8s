@@ -14,6 +14,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/config"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/spf13/pflag"
@@ -127,5 +128,6 @@ func BuildRuntimeOptions(rtCfg RuntimeConfig, scheme *runtime.Scheme) ctrl.Optio
 		LeaderElectionID:        rtCfg.LeaderElectionID,
 		LeaderElectionNamespace: rtCfg.LeaderElectionNamespace,
 		Cache:                   cacheOptions,
+		Controller:              ctrlconfig.Controller{CacheSyncTimeout: 10 * time.Minute},
 	}
 }
