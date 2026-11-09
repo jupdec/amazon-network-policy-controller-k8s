@@ -310,6 +310,8 @@ func (r *defaultEndpointsResolver) computePodSelectorEndpoints(ctx context.Conte
 				HostIP:    policyinfo.NetworkAddress(pod.Status.HostIP),
 				Name:      pod.Name,
 				Namespace: pod.Namespace,
+				// Copy: the pod may come from the informer cache, which must not be aliased.
+				Labels: maps.Clone(pod.Labels),
 			})
 		}
 	}
