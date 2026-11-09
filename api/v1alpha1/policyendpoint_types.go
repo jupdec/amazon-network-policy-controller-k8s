@@ -73,6 +73,10 @@ type PodEndpoint struct {
 	Name string `json:"name"`
 	// Namespace is the pod namespace
 	Namespace string `json:"namespace"`
+	// Labels are the pod's labels at the time the endpoint was published.
+	// Node agents can use them to derive a label-based pod identity.
+	// +optional
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 // PolicyEndpointSpec defines the desired state of PolicyEndpoint

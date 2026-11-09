@@ -489,7 +489,7 @@ func (m *policyEndpointsManager) processExistingPolicyEndpoints(
 ) (
 	map[string]policyinfo.EndpointInfo,
 	map[string]policyinfo.EndpointInfo,
-	sets.Set[policyinfo.PodEndpoint],
+	podEndpointSet,
 	[]policyinfo.PolicyEndpoint,
 	[]policyinfo.PolicyEndpoint,
 ) {
@@ -503,7 +503,7 @@ func (m *policyEndpointsManager) processExistingPolicyEndpoints(
 	for _, egressEndpoint := range egressEndpoints {
 		egressEndpointsMap[m.getEndpointInfoKey(egressEndpoint)] = egressEndpoint
 	}
-	podSelectorEndpointSet := sets.New[policyinfo.PodEndpoint](podSelectorEndpoints...)
+	podSelectorEndpointSet := newPodEndpointSet(podSelectorEndpoints...)
 	// Go over the existing endpoints, and remove entries that are no longer needed
 	var modifiedEndpoints []policyinfo.PolicyEndpoint
 	var potentialDeletes []policyinfo.PolicyEndpoint

@@ -391,6 +391,7 @@ func TestPodEndpointKey_CoversAllFields(t *testing.T) {
 		"PodIP",
 		"Name",
 		"Namespace",
+		"Labels",
 	}
 	assert.ElementsMatch(t, expected, structFieldNames(policyinfo.PodEndpoint{}),
 		"PodEndpoint fields changed — update podEndpointKey in semantic.go")
@@ -404,4 +405,22 @@ func TestPortKey_CoversAllFields(t *testing.T) {
 	}
 	assert.ElementsMatch(t, expected, structFieldNames(policyinfo.Port{}),
 		"Port fields changed — update portKey in semantic.go")
+}
+
+func TestPodEndpointKey_Labels(t *testing.T) {
+	base := policyinfo.PodEndpoint{Name: "db-0", Namespace: "prod", PodIP: "10.0.1.5", HostIP: "192.168.1.10"}
+
+	a := base
+	a.Labels = map[string]string{"app": "db", "tier": "backend"}
+	b := base
+	b.Labels = map[string]string{"tier": "backend", "app": "db"}
+	assert.Equal(t, PodEndpointKey(a), PodEndpointKey(b), "label order must not change the key")
+
+	c := base
+	c.Labels = map[string]string{"app": "evil", "tier": "backend"}
+	assert.NotEqual(t, PodEndpointKey(a), PodEndpointKey(c), "different labels must give a different key")
+
+	assert.NotEqual(t, PodEndpointKey(base), PodEndpointKey(a), "adding labels must change the key")
+	assert.True(t, equalPodEndpointSlice([]policyinfo.PodEndpoint{a}, []policyinfo.PodEndpoint{b}))
+	assert.False(t, equalPodEndpointSlice([]policyinfo.PodEndpoint{a}, []policyinfo.PodEndpoint{c}))
 }

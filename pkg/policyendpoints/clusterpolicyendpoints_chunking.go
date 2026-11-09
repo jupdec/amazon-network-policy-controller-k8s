@@ -33,7 +33,7 @@ func (m *policyEndpointsManager) processExistingClusterPolicyEndpoints(
 	metadata ClusterPolicyMetadata) (
 	map[string]policyinfo.ClusterEndpointInfo,
 	map[string]policyinfo.ClusterEndpointInfo,
-	sets.Set[policyinfo.PodEndpoint],
+	podEndpointSet,
 	[]policyinfo.ClusterPolicyEndpoint,
 	[]policyinfo.ClusterPolicyEndpoint) {
 
@@ -50,7 +50,7 @@ func (m *policyEndpointsManager) processExistingClusterPolicyEndpoints(
 		egressEndpointsMap[key] = rule
 	}
 
-	podSelectorEndpointSet := sets.New(podSelectorEndpoints...)
+	podSelectorEndpointSet := newPodEndpointSet(podSelectorEndpoints...)
 
 	var modifiedCPEs []policyinfo.ClusterPolicyEndpoint
 	var potentialDeletes []policyinfo.ClusterPolicyEndpoint

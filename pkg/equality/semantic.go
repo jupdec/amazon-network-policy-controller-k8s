@@ -3,6 +3,7 @@ package equality
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	networking "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -134,7 +135,31 @@ func equalClusterEndpointInfoSlice(a, b []policyinfo.ClusterEndpointInfo) bool {
 // ---------------------------------------------------------------------------
 
 func podEndpointKey(p policyinfo.PodEndpoint) string {
-	return fmt.Sprintf("%s/%s/%s/%s", p.Namespace, p.Name, p.PodIP, p.HostIP)
+	return PodEndpointKey(p)
+}
+
+// PodEndpointKey returns a string that identifies a PodEndpoint by all of its fields,
+// including its labels (sorted by key), so it can be used as a map or set key.
+func PodEndpointKey(p policyinfo.PodEndpoint) string {
+	key := fmt.Sprintf("%s/%s/%s/%s", p.Namespace, p.Name, p.PodIP, p.HostIP)
+	if len(p.Labels) == 0 {
+		return key
+	}
+	labelKeys := make([]string, 0, len(p.Labels))
+	for k := range p.Labels {
+		labelKeys = append(labelKeys, k)
+	}
+	sort.Strings(labelKeys)
+	var b strings.Builder
+	b.WriteString(key)
+	for _, k := range labelKeys {
+		// '=' and '\n' can't appear in label keys or values, so the encoding is unambiguous.
+		b.WriteString("\n")
+		b.WriteString(k)
+		b.WriteString("=")
+		b.WriteString(p.Labels[k])
+	}
+	return b.String()
 }
 
 func equalPodEndpointSlice(a, b []policyinfo.PodEndpoint) bool {

@@ -1619,6 +1619,13 @@ spec:
                       description: HostIP is the IP address of the host the pod is
                         currently running on
                       type: string
+                    labels:
+                      additionalProperties:
+                        type: string
+                      description: |-
+                        Labels are the pod's labels at the time the endpoint was published.
+                        Node agents can use them to derive a label-based pod identity.
+                      type: object
                     name:
                       description: Name is the pod name
                       type: string
@@ -2033,6 +2040,13 @@ spec:
                       description: HostIP is the IP address of the host the pod is
                         currently running on
                       type: string
+                    labels:
+                      additionalProperties:
+                        type: string
+                      description: |-
+                        Labels are the pod's labels at the time the endpoint was published.
+                        Node agents can use them to derive a label-based pod identity.
+                      type: object
                     name:
                       description: Name is the pod name
                       type: string
